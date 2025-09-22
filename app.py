@@ -9,4 +9,8 @@ print(f"IP: {ipaddress}")
 
 print("Nuevo")
 
-print("Creo que ya")
+print("Creo que ya") 
+
+numero_a = int(input("Dame el primer numero: "))
+numero_b = int(input("Dame el segundo numero: "))
+print(f"La suma es: {numero_a + numero_b}")
