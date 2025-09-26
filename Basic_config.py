@@ -1,107 +1,112 @@
 import serial
 import time
 import pandas as pd
-import os
+import re
 
-def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
+# ========= FUNCIONES =========
 
-def configure_device(port, baudrate, hostname, username, password, domain):
-    try:
-        ser = serial.Serial(port, baudrate, timeout=1)
-        print(f"Conectado a {port}. Configurando el dispositivo: {hostname}")
-        time.sleep(2)  # Esperar a que la conexión se establezca
-        ser.write(b'\n')  # Enviar un salto de línea para iniciar la comunicación
-        time.sleep(1)
-        ser.write(b'enable\n')
-        time.sleep(1)
-        ser.write(b'configure terminal\n')
-        time.sleep(1)
-        ser.write(f'hostname {hostname}\n'.encode())
-        time.sleep(1)
-        ser.write(f'username {username} privilege 15 password {password}\n'.encode())
-        time.sleep(1)
-        ser.write(f'ip domain-name {domain}\n'.encode())
-        time.sleep(1)
-        ser.write(b'crypto key generate rsa\n')
-        time.sleep(2)  # Esperar a que se genere la clave
-        ser.write(b'1024\n')  # Tamaño de la clave
-        time.sleep(5) # Aumentamos la espera por si la generación de claves es lenta
-        ser.write(b'ip ssh version 2\n')
-        time.sleep(1)
-        ser.write(b'line console 0\n')
-        time.sleep(1)
-        ser.write(b'login local\n')
-        time.sleep(1)
-        ser.write(b'exit\n') # Salir de line console 0
-        time.sleep(1)
-        ser.write(b'line vty 0 4\n')
-        time.sleep(1)
-        ser.write(b'login local\n')
-        time.sleep(1)
-        ser.write(b'transport input ssh\n')
-        time.sleep(1)
-        # El comando 'transport output ssh' no es estándar y puede dar error, se ha comentado
-        # ser.write(b'transport output ssh\n')
-        # time.sleep(1)
-        ser.write(b'exit\n') # Salir de line vty 0 4
-        time.sleep(1)
-        ser.write(b'end\n') # Salir del modo de configuración
-        time.sleep(1)
-        ser.write(b'write memory\n')
-        time.sleep(5) # Esperar a que se guarde la configuración
-        ser.close()
-        print(f"Configuración de '{hostname}' completada exitosamente.")
-        return True
-    except Exception as e:
-        print(f"Error al configurar el dispositivo '{hostname}': {e}")
-        return False
+def obtener_modelo_serie(ser):
+    """Ejecuta 'show inventory' y extrae modelo (PID) y serie (SN)."""
+    ser.write(b"show inventory\n")
+    time.sleep(2)
 
-# --- INICIO DE LA LÓGICA PARA LEER EXCEL Y EJECUTAR ---
+    salida = ""
+    if ser.in_waiting:
+        salida = ser.read(ser.in_waiting).decode(errors="ignore")
 
-# 1. Solicitar información al usuario
-clear_screen()
-print("--- Script de Configuración de Dispositivos por Consola ---")
-excel_file = input("Introduce la ruta de tu archivo Excel: ")
-com_port = input("Introduce el puerto COM a utilizar (ej: COM3): ")
-baudrate = 9600
+    regex_modelo = re.search(r"PID:\s*([\w\-/]+)", salida)
+    regex_serie = re.search(r"SN:\s*([\w\d]+)", salida)
 
-# 2. Leer el archivo Excel y procesar los dispositivos
-try:
-    df = pd.read_excel(excel_file)
+    modelo = regex_modelo.group(1) if regex_modelo else None
+    serie = regex_serie.group(1) if regex_serie else None
+
+    return modelo, serie, salida
+
+
+def configurar_dispositivo(ser, nombre, usuario, contrasena, dominio):
+    """Envía comandos de configuración al dispositivo."""
+    comandos = [
+        "configure terminal",
+        f"hostname {nombre}",
+        f"username {usuario} password {contrasena}",
+        f"ip domain-name {dominio}",
+        "crypto key generate rsa",
+    ]
+
+    for cmd in comandos:
+        ser.write(f"{cmd}\n".encode())
+        time.sleep(1)
+
+    # Tamaño de clave
+    ser.write(b"1024\n")
+    time.sleep(2)
+
+    # Config extra
+    extra_cmds = [
+        "ip ssh version 2",
+        "line console 0",
+        "login local",
+        "line vty 0 4",
+        "login local",
+        "transport input ssh",
+        "transport output ssh",
+        "end",
+        "write memory"
+    ]
+
+    for cmd in extra_cmds:
+        ser.write(f"{cmd}\n".encode())
+        time.sleep(1)
+
+    print(f"✅ Configuración aplicada a {nombre}")
+
+
+def cargar_y_configurar():
+    """Lee el Excel y configura el dispositivo si hay coincidencia."""
+    df = pd.read_excel(r"C:\Users\janet\OneDrive\Documentos\Pragramcion de redes\GIT LEARNING\dispositivos_ejemplo.xlsx")
     
-    # Validar que las columnas necesarias existan
-    required_columns = ['Hostname', 'Username', 'Password', 'Domain']
-    if not all(col in df.columns for col in required_columns):
-        print("\nError: Asegúrate de que tu archivo Excel tenga las columnas: 'Hostname', 'Username', 'Password', 'Domain'")
-    else:
-        print(f"\nSe encontraron {len(df)} dispositivos para configurar en el archivo.")
-        
-        # 3. Iterar sobre cada dispositivo en el archivo
-        for index, row in df.iterrows():
-            # Extraer los datos de la fila
-            hostname = row['Hostname']
-            username = row['Username']
-            password = row['Password']
-            domain = row['Domain']
 
-            # Mostrar información y esperar confirmación
-            print("\n" + "="*50)
-            print(f"Siguiente dispositivo a configurar ({index + 1}/{len(df)}):")
-            print(f"  > Hostname: {hostname}")
-            print(f"  > Usuario:  {username}")
-            print(f"  > Dominio:  {domain}")
-            print("="*50)
-            
-            # Pausa para que el usuario pueda conectar el cable al siguiente dispositivo
-            input("Conecta el cable de consola al dispositivo y presiona Enter para continuar...")
+    # Validar columnas
+    columnas = {"modelo", "serie", "puerto", "baudios", "nombre", "usuario", "contrasena", "dominio"}
+    if not columnas.issubset(df.columns):
+        raise ValueError(f"El Excel debe tener las columnas: {columnas}")
 
-            # Llamar a la función de configuración
-            configure_device(com_port, baudrate, hostname, username, str(password), domain)
-        
-        print("\nProceso finalizado. Todos los dispositivos han sido procesados.")
+    # Tomar datos de conexión del Excel (puerto y baudios)
+    for _, fila in df.iterrows():
+        puerto = fila["puerto"]
+        baudios = int(fila["baudios"])
 
-except FileNotFoundError:
-    print(f"\nError: No se pudo encontrar el archivo en la ruta '{excel_file}'")
-except Exception as e:
-    print(f"\nOcurrió un error inesperado: {e}")
+        try:
+            print(f"\n🔌 Conectando al puerto {puerto}...")
+            ser = serial.Serial(puerto, baudios, timeout=2)
+            time.sleep(2)
+
+            # Obtener modelo y serie reales del dispositivo
+            modelo_real, serie_real, salida = obtener_modelo_serie(ser)
+            print(f"📋 Modelo detectado: {modelo_real}, Serie: {serie_real}")
+
+            # Comparar con Excel
+            if modelo_real == fila["modelo"] and serie_real == fila["serie"]:
+                print("✅ Coincidencia encontrada en Excel, configurando...")
+                configurar_dispositivo(
+                    ser,
+                    fila["nombre"],
+                    fila["usuario"],
+                    fila["contrasena"],
+                    fila["dominio"]
+                )
+            else:
+                print("⚠️ No coincide con el Excel, se omite configuración.")
+                print("Salida completa de 'show inventory':\n", salida)
+
+            ser.close()
+
+        except Exception as e:
+            print(f"❌ Error en {puerto}: {e}")
+
+
+# ========= MAIN =========
+
+if __name__ == "__main__":
+    # Cambia esta ruta por la ubicación real de tu Excel
+    cargar_y_configurar()
