@@ -48,11 +48,18 @@ def obtener_info_basica(ser):
     modelo = re.search(r"PID:\s*([\w\-/]+)", salida_inventory)
     serie = re.search(r"SN:\s*([\w\d]+)", salida_inventory)
     
-    # Obtener hostname y uptime
+    # Obtener hostname - método más robusto
     salida_version = enviar_comando(ser, "show version")
+    
+    # Intentar diferentes patrones para hostname
     hostname = re.search(r'^(\S+)\s+uptime', salida_version)
     if not hostname:
         hostname = re.search(r'^([a-zA-Z0-9\-_]+)#', salida_version)
+    if not hostname:
+        # Buscar en el prompt de comandos
+        hostname = re.search(r'([a-zA-Z0-9\-_]+)>\s*$', salida_version)
+    if not hostname:
+        hostname = re.search(r'([a-zA-Z0-9\-_]+)#\s*$', salida_version)
     
     uptime = re.search(r'uptime\s+is\s+(.+)', salida_version)
     
@@ -63,6 +70,13 @@ def obtener_info_basica(ser):
         'uptime': uptime.group(1) if uptime else 'N/A',
         'fecha_escaneo': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+    
+    # Debug para hostname
+    if info_basica['hostname'] == 'N/A':
+        print("⚠️  No se pudo detectar el hostname, revisando salida...")
+        lineas = salida_version.split('\n')
+        for i, linea in enumerate(lineas[-5:]):  # Últimas 5 líneas
+            print(f"   Línea {i}: {linea.strip()}")
     
     return info_basica
 
@@ -167,10 +181,18 @@ def cargar_excel_existente():
         ]
         return pd.DataFrame(columns=columnas)
 
-def guardar_en_excel(info_basica, interfaces, df_existente):
-    """Guarda la información en el Excel acumulativo"""
+def dispositivo_existe(df_existente, serie):
+    """Verifica si el dispositivo ya existe en el Excel"""
+    if df_existente.empty:
+        return False
+    return serie in df_existente['Numero de serie'].values
+
+def actualizar_dispositivo(df_existente, info_basica, interfaces):
+    """Actualiza la información de un dispositivo existente"""
+    # Eliminar registros antiguos del dispositivo
+    df_actualizado = df_existente[df_existente['Numero de serie'] != info_basica['serie']].copy()
     
-    # Crear datos para el nuevo router
+    # Agregar nuevos registros
     nuevos_datos = []
     for interfaz in interfaces:
         nuevo_registro = {
@@ -187,14 +209,46 @@ def guardar_en_excel(info_basica, interfaces, df_existente):
         }
         nuevos_datos.append(nuevo_registro)
     
-    # Crear DataFrame con los nuevos datos
+    df_nuevo = pd.DataFrame(nuevos_datos)
+    df_final = pd.concat([df_actualizado, df_nuevo], ignore_index=True)
+    
+    return df_final
+
+def agregar_dispositivo(df_existente, info_basica, interfaces):
+    """Agrega un nuevo dispositivo al Excel"""
+    nuevos_datos = []
+    for interfaz in interfaces:
+        nuevo_registro = {
+            'modelo': info_basica['modelo'],
+            'Numero de serie': info_basica['serie'],
+            'Hostname': info_basica['hostname'],
+            'fecha_escaneo': info_basica['fecha_escaneo'],
+            'Interface': interfaz['Interface'],
+            'IP-Address': interfaz['IP-Address'],
+            'OK': interfaz['OK'],
+            'Method': interfaz['Method'],
+            'Status': interfaz['Status'],
+            'Protocol': interfaz['Protocol']
+        }
+        nuevos_datos.append(nuevo_registro)
+    
     df_nuevo = pd.DataFrame(nuevos_datos)
     
-    # Combinar con datos existentes
     if df_existente.empty:
-        df_final = df_nuevo
+        return df_nuevo
     else:
-        df_final = pd.concat([df_existente, df_nuevo], ignore_index=True)
+        return pd.concat([df_existente, df_nuevo], ignore_index=True)
+
+def guardar_en_excel(info_basica, interfaces, df_existente):
+    """Guarda la información en el Excel acumulativo"""
+    
+    # Verificar si el dispositivo ya existe
+    if dispositivo_existe(df_existente, info_basica['serie']):
+        print(f"🔄 Dispositivo {info_basica['serie']} ya existe, actualizando...")
+        df_final = actualizar_dispositivo(df_existente, info_basica, interfaces)
+    else:
+        print(f"➕ Nuevo dispositivo {info_basica['serie']}, agregando...")
+        df_final = agregar_dispositivo(df_existente, info_basica, interfaces)
     
     # Guardar en Excel con formato
     try:
@@ -223,6 +277,7 @@ def guardar_en_excel(info_basica, interfaces, df_existente):
         
         print(f"✅ Información guardada en: {ARCHIVO_EXCEL}")
         print(f"📊 Total de registros en el inventario: {len(df_final)}")
+        print(f"🔢 Total de dispositivos únicos: {df_final['Numero de serie'].nunique()}")
         
     except Exception as e:
         print(f"❌ Error al guardar en Excel: {e}")
@@ -259,7 +314,7 @@ def main():
         for interfaz in interfaces:
             print(f"   - {interfaz['Interface']}: {interfaz['IP-Address']} ({interfaz['Status']}/{interfaz['Protocol']})")
         
-        # 3. Cargar Excel existente y guardar nueva información
+        # 3. Cargar Excel existente y guardar/actualizar información
         df_existente = cargar_excel_existente()
         guardar_en_excel(info_basica, interfaces, df_existente)
         
